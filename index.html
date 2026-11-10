@@ -150,12 +150,25 @@ function speak(text,lang){
 
 let P=[0,1],recs={},active=new Set(),mode="fixed",cur=0,fin=[],finTimer=null,iv={},lastC={idx:-1,at:0},aborts=[];
 const otherOf=i=>i===P[0]?P[1]:P[0];
+const IOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+const NONLAT=new Set(["ja","zh-CN","ko","th","ru"]);
+function resolveIdx(idx,t){
+  if(!AUTO())return idx;
+  const o=otherOf(idx),nl=i=>NONLAT.has(LANGS[i][2]);
+  const n=t.replace(/[\s\d\p{P}]/gu,"").length;
+  if(!n)return idx;
+  const r=(t.match(/[A-Za-z\u00C0-\u024F]/g)||[]).length/n;
+  if(nl(idx)&&!nl(o)&&r>0.8)return o;
+  if(!nl(idx)&&nl(o)&&r<0.2)return o;
+  return idx;
+}
+function updFlip(){$("flip").textContent="聞き取り中: "+LANGS[cur][0]+"(タップで切替)"}
 
 function gotInterim(idx,t){
   if(muted)return;
   iv[idx]={t,at:Date.now()};
   const c=Object.entries(iv).filter(([k,v])=>Date.now()-v.at<1200).sort((a,b)=>b[1].t.length-a[1].t.length)[0];
-  const use=c?+c[0]:idx,txt=c?c[1].t:t;
+  const txt=c?c[1].t:t,use=resolveIdx(c?+c[0]:idx,txt);
   setInterim(inp,txt,AUTO()?LANGS[use][0]:"");
   if(!$("live").checked)return;
   clearTimeout(timer);
@@ -177,7 +190,6 @@ function gotFinal(idx,t,conf){
     return;
   }
   commit(idx,t);
-  if(mode==="single"&&conf>0&&conf<0.55)flip();
 }
 function flush(){
   finTimer=null;const f=fin;fin=[];
@@ -186,6 +198,8 @@ function flush(){
   commit(f[0].idx,f[0].t);
 }
 async function commit(idx,t){
+  idx=resolveIdx(idx,t);
+  if(mode==="single")flip(otherOf(idx));
   clearTimeout(timer);token++;
   lastC={idx,at:Date.now()};
   const to=otherOf(idx),tag=AUTO();
@@ -229,27 +243,30 @@ function fallbackSingle(){
   [P[0],P[1]].forEach(killRec);
   cur=P[0];recs[cur]=mk(cur);active.add(cur);
   setTimeout(()=>{try{recs[cur].start()}catch(e){}},300);
-  $("flip").hidden=false;
+  $("flip").hidden=false;updFlip();
   say("この端末は2言語の同時認識に未対応のため、自動切替モードで聞き取り中:"+LANGS[cur][0]+"(認識が不安定なときは「聞き取り言語を切替」を押してください)");
 }
-function flip(){
+function flip(to){
   if(mode!=="single")return;
-  killRec(cur);cur=otherOf(cur);
+  const n=(typeof to==="number")?to:otherOf(cur);
+  if(n===cur&&recs[cur])return;
+  killRec(cur);cur=n;
   recs[cur]=mk(cur);active.add(cur);
-  setTimeout(()=>{try{recs[cur].start()}catch(e){}},250);
-  say("聞き取り言語:"+LANGS[cur][0]);
+  setTimeout(()=>{if(running){try{recs[cur].start()}catch(e){}}},250);
+  updFlip();say("次の聞き取り言語: "+LANGS[cur][0]+"(同じ言語で続けるときは下のボタンで切替)");
 }
-$("flip").onclick=flip;
+$("flip").onclick=()=>flip();
 
 function start(){
   if(!SR){say("このブラウザは音声認識に未対応です。iPhoneはSafari、PCはChromeで開いてください。");return}
   const A=+src.value,B=+dst.value;
   if(AUTO()&&A===B){say("2つの言語を別々に選んでください。");return}
   P=[A,B];recs={};active=new Set();aborts=[];fin=[];iv={};
-  if(AUTO()){mode="par";[A,B].forEach(i=>{recs[i]=mk(i);active.add(i)})}
+  if(AUTO()&&IOS){mode="single";recs[A]=mk(A);active.add(A);$("flip").hidden=false;cur=A;updFlip()}
+  else if(AUTO()){mode="par";[A,B].forEach(i=>{recs[i]=mk(i);active.add(i)})}
   else{mode="fixed";recs[A]=mk(A);active.add(A)}
-  cur=A;running=true;mic.classList.add("on");mic.textContent="停止";
-  say(AUTO()?LANGS[A][0]+"と"+LANGS[B][0]+"を自動判定して聞き取り中…":LANGS[A][0]+"を聞き取り中…");
+  if(mode!=="single")cur=A;running=true;mic.classList.add("on");mic.textContent="停止";
+  say(mode==="single"?LANGS[A][0]+"を聞き取り中。1回話すごとに相手の言語へ自動で切り替わります。":AUTO()?LANGS[A][0]+"と"+LANGS[B][0]+"を自動判定して聞き取り中…":LANGS[A][0]+"を聞き取り中…");
   active.forEach(i=>{try{recs[i].start()}catch(e){noteAbort()}});
 }
 function stop(){
