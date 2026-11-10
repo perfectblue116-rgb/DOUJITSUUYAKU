@@ -33,6 +33,8 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:0 16
 @keyframes b{50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){#mic.on::before{animation:none}}
 .bar .ib{height:54px;padding:0 14px}
+[hidden]{display:none!important}
+.tag{font-size:11px;font-weight:500;color:var(--acc);border:1px solid var(--line);border-radius:6px;padding:0 5px;margin-right:6px;vertical-align:middle}
 :focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 </style>
 </head>
@@ -48,6 +50,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:0 16
   <select id="dst" aria-label="訳す言語"></select>
 </div>
 <div class="opts">
+  <label><input type="checkbox" id="auto" checked> 自動判定(切り替え不要)</label>
   <label><input type="checkbox" id="speak"> 訳文を読み上げ(イヤホン推奨)</label>
   <label><input type="checkbox" id="live" checked> 話し途中でも翻訳</label>
   <label>文字 <input type="range" id="fs" min="14" max="34" value="20"></label>
@@ -57,7 +60,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:0 16
   <section class="pane"><h2 id="dstLabel">訳文</h2><div class="box" id="out"></div></section>
 </main>
 <div class="msg" id="msg">開始を押してマイクを許可してください。</div>
-<div class="bar"><button id="mic">通訳を開始</button></div>
+<div class="bar"><button class="ib" id="flip" hidden>聞き取り言語を切替</button><button id="mic">通訳を開始</button></div>
 
 <script>
 const LANGS=[
@@ -70,11 +73,15 @@ const src=$("src"),dst=$("dst"),inp=$("inp"),out=$("out"),msg=$("msg"),mic=$("mi
 LANGS.forEach((l,i)=>{src.add(new Option(l[0],i));dst.add(new Option(l[0],i))});
 src.value=0;dst.value=1;
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-let rec=null,running=false,token=0,timer=null,translators={};
+let running=false,token=0,timer=null,translators={};
 const say=t=>msg.textContent=t;
-const lab=()=>{$("srcLabel").textContent="原文("+LANGS[src.value][0]+")";$("dstLabel").textContent="訳文("+LANGS[dst.value][0]+")"};
+const AUTO=()=>$("auto").checked;
+const lab=()=>{
+  if(AUTO()){$("srcLabel").textContent="原文(話した言語を自動判定)";$("dstLabel").textContent="訳文(もう一方の言語へ)"}
+  else{$("srcLabel").textContent="原文("+LANGS[src.value][0]+")";$("dstLabel").textContent="訳文("+LANGS[dst.value][0]+")"}
+};
 lab();
-[src,dst].forEach(s=>s.onchange=()=>{lab();if(running){stop();start()}});
+[src,dst,$("auto")].forEach(s=>s.onchange=()=>{lab();if(running){stop();start()}});
 $("swap").onclick=()=>{const a=src.value;src.value=dst.value;dst.value=a;src.onchange()};
 $("fs").oninput=e=>document.documentElement.style.setProperty("--fs",e.target.value+"px");
 $("clear").onclick=()=>{inp.innerHTML="";out.innerHTML=""};
@@ -120,70 +127,140 @@ async function translate(text,s,d){
   throw new Error(errs.join(" / "));
 }
 
-function setInterim(box,text){
+function setInterim(box,text,tag){
   let p=box.querySelector("p.interim");
   if(!text){if(p)p.remove();return}
   if(!p){p=document.createElement("p");p.className="interim";box.appendChild(p)}
-  p.textContent=text;box.scrollTop=box.scrollHeight;
+  p.textContent=(tag?"["+tag+"] ":"")+text;box.scrollTop=box.scrollHeight;
 }
-function addFinal(box,text){
+function addFinal(box,text,tag){
   setInterim(box,"");
-  const p=document.createElement("p");p.textContent=text;box.appendChild(p);box.scrollTop=box.scrollHeight;
+  const p=document.createElement("p");
+  if(tag){const g=document.createElement("span");g.className="tag";g.textContent=tag;p.appendChild(g)}
+  p.appendChild(document.createTextNode(text));box.appendChild(p);box.scrollTop=box.scrollHeight;
 }
+let muted=false;
 function speak(text,lang){
   if(!$("speak").checked||!("speechSynthesis" in window))return;
-  const u=new SpeechSynthesisUtterance(text);u.lang=lang;speechSynthesis.speak(u);
+  const u=new SpeechSynthesisUtterance(text);u.lang=lang;
+  u.onstart=()=>{muted=true};
+  u.onend=u.onerror=()=>setTimeout(()=>{muted=false},400);
+  speechSynthesis.speak(u);
 }
 
-async function onInterim(text){
-  setInterim(inp,text);
+let P=[0,1],recs={},active=new Set(),mode="fixed",cur=0,fin=[],finTimer=null,iv={},lastC={idx:-1,at:0},aborts=[];
+const otherOf=i=>i===P[0]?P[1]:P[0];
+
+function gotInterim(idx,t){
+  if(muted)return;
+  iv[idx]={t,at:Date.now()};
+  const c=Object.entries(iv).filter(([k,v])=>Date.now()-v.at<1200).sort((a,b)=>b[1].t.length-a[1].t.length)[0];
+  const use=c?+c[0]:idx,txt=c?c[1].t:t;
+  setInterim(inp,txt,AUTO()?LANGS[use][0]:"");
   if(!$("live").checked)return;
   clearTimeout(timer);
   const my=++token;
   timer=setTimeout(async()=>{
     try{
-      const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
-      if(my===token&&running)setInterim(out,t);
+      const r=await translate(txt,LANGS[use][2],LANGS[otherOf(use)][2]);
+      if(my===token&&running)setInterim(out,r,AUTO()?LANGS[otherOf(use)][0]:"");
     }catch(e){say("翻訳失敗: "+e.message)}
   },500);
 }
-async function onFinal(text){
+function gotFinal(idx,t,conf){
+  if(muted)return;
+  iv={};
+  if(mode==="par"){
+    if(lastC.idx!==idx&&Date.now()-lastC.at<1500)return;
+    fin.push({idx,t,conf});
+    if(!finTimer)finTimer=setTimeout(flush,900);
+    return;
+  }
+  commit(idx,t);
+  if(mode==="single"&&conf>0&&conf<0.55)flip();
+}
+function flush(){
+  finTimer=null;const f=fin;fin=[];
+  if(!f.length)return;
+  f.sort((a,b)=>(b.conf-a.conf)||(b.t.length-a.t.length));
+  commit(f[0].idx,f[0].t);
+}
+async function commit(idx,t){
   clearTimeout(timer);token++;
-  addFinal(inp,text);
+  lastC={idx,at:Date.now()};
+  const to=otherOf(idx),tag=AUTO();
+  addFinal(inp,t,tag?LANGS[idx][0]:"");
   setInterim(out,"…");
   try{
-    const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
-    addFinal(out,t);speak(t,LANGS[dst.value][1]);
+    const r=await translate(t,LANGS[idx][2],LANGS[to][2]);
+    addFinal(out,r,tag?LANGS[to][0]:"");speak(r,LANGS[to][1]);
   }catch(e){addFinal(out,"(翻訳失敗)");say("翻訳失敗: "+e.message)}
 }
 
+function mk(idx){
+  const r=new SR();
+  r.lang=LANGS[idx][1];r.continuous=true;r.interimResults=true;
+  r.onresult=e=>{
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const x=e.results[i],t=x[0].transcript.trim();
+      if(!t)continue;
+      if(x.isFinal)gotFinal(idx,t,x[0].confidence||0);else gotInterim(idx,t);
+    }
+  };
+  r.onerror=e=>{
+    if(e.error==="not-allowed"||e.error==="service-not-allowed"){stop();say("マイクが使えませんでした("+e.error+")。設定でマイクと音声入力を許可してください。")}
+    else if(e.error==="aborted"){noteAbort()}
+    else if(e.error!=="no-speech")say("音声認識エラー: "+e.error);
+  };
+  r.onend=()=>{if(running&&active.has(idx))setTimeout(()=>{if(running&&active.has(idx)){try{r.start()}catch(e){}}},150)};
+  return r;
+}
+function noteAbort(){
+  if(mode!=="par")return;
+  const n=Date.now();aborts.push(n);aborts=aborts.filter(x=>n-x<4000);
+  if(aborts.length>=3)fallbackSingle();
+}
+function killRec(i){
+  active.delete(i);
+  if(recs[i]){recs[i].onend=null;recs[i].onerror=null;try{recs[i].abort()}catch(e){}}
+}
+function fallbackSingle(){
+  mode="single";
+  [P[0],P[1]].forEach(killRec);
+  cur=P[0];recs[cur]=mk(cur);active.add(cur);
+  setTimeout(()=>{try{recs[cur].start()}catch(e){}},300);
+  $("flip").hidden=false;
+  say("この端末は2言語の同時認識に未対応のため、自動切替モードで聞き取り中:"+LANGS[cur][0]+"(認識が不安定なときは「聞き取り言語を切替」を押してください)");
+}
+function flip(){
+  if(mode!=="single")return;
+  killRec(cur);cur=otherOf(cur);
+  recs[cur]=mk(cur);active.add(cur);
+  setTimeout(()=>{try{recs[cur].start()}catch(e){}},250);
+  say("聞き取り言語:"+LANGS[cur][0]);
+}
+$("flip").onclick=flip;
+
 function start(){
   if(!SR){say("このブラウザは音声認識に未対応です。iPhoneはSafari、PCはChromeで開いてください。");return}
-  rec=new SR();
-  rec.lang=LANGS[src.value][1];rec.continuous=true;rec.interimResults=true;
-  rec.onresult=e=>{
-    let interim="";
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      const r=e.results[i],t=r[0].transcript.trim();
-      if(r.isFinal){if(t)onFinal(t)}else interim+=t;
-    }
-    if(interim)onInterim(interim);
-  };
-  rec.onerror=e=>{
-    if(e.error==="not-allowed"||e.error==="service-not-allowed"){say("マイクが許可されていません。ブラウザの設定で許可してください。");stop()}
-    else if(e.error!=="no-speech"&&e.error!=="aborted")say("音声認識エラー: "+e.error);
-  };
-  rec.onend=()=>{if(running){try{rec.start()}catch(e){}}};
-  running=true;mic.classList.add("on");mic.textContent="停止";
-  say(LANGS[src.value][0]+"を聞き取り中…");
-  try{rec.start()}catch(e){}
+  const A=+src.value,B=+dst.value;
+  if(AUTO()&&A===B){say("2つの言語を別々に選んでください。");return}
+  P=[A,B];recs={};active=new Set();aborts=[];fin=[];iv={};
+  if(AUTO()){mode="par";[A,B].forEach(i=>{recs[i]=mk(i);active.add(i)})}
+  else{mode="fixed";recs[A]=mk(A);active.add(A)}
+  cur=A;running=true;mic.classList.add("on");mic.textContent="停止";
+  say(AUTO()?LANGS[A][0]+"と"+LANGS[B][0]+"を自動判定して聞き取り中…":LANGS[A][0]+"を聞き取り中…");
+  active.forEach(i=>{try{recs[i].start()}catch(e){noteAbort()}});
 }
 function stop(){
   running=false;mic.classList.remove("on");mic.textContent="通訳を開始";
-  clearTimeout(timer);token++;
-  if(rec){rec.onend=null;try{rec.stop()}catch(e){}}
+  clearTimeout(timer);clearTimeout(finTimer);finTimer=null;token++;fin=[];iv={};
+  [...active].forEach(killRec);
+  Object.keys(recs).forEach(killRec);
+  $("flip").hidden=true;
   setInterim(inp,"");setInterim(out,"");
   if("speechSynthesis" in window)speechSynthesis.cancel();
+  muted=false;
   say("停止しました。");
 }
 mic.onclick=()=>running?stop():start();
