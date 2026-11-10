@@ -74,7 +74,7 @@ let rec=null,running=false,token=0,timer=null,translators={};
 const say=t=>msg.textContent=t;
 const lab=()=>{$("srcLabel").textContent="原文("+LANGS[src.value][0]+")";$("dstLabel").textContent="訳文("+LANGS[dst.value][0]+")"};
 lab();
-[src,dst].forEach(s=>s.onchange=()=>{lab();if(running){stop();start()}});
+[src,dst].forEach(s=>s.onchange=()=>{lab();if(running){stop();setTimeout(start,500)}});
 $("swap").onclick=()=>{const a=src.value;src.value=dst.value;dst.value=a;src.onchange()};
 $("fs").oninput=e=>document.documentElement.style.setProperty("--fs",e.target.value+"px");
 $("clear").onclick=()=>{inp.innerHTML="";out.innerHTML=""};
@@ -157,31 +157,46 @@ async function onFinal(text){
   }catch(e){addFinal(out,"(翻訳失敗)");say("翻訳失敗: "+e.message)}
 }
 
-function start(){
-  if(!SR){say("このブラウザは音声認識に未対応です。iPhoneはSafari、PCはChromeで開いてください。");return}
-  rec=new SR();
-  rec.lang=LANGS[src.value][1];rec.continuous=true;rec.interimResults=true;
-  rec.onresult=e=>{
+const IOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+let gen=0;
+function listen(){
+  if(!running)return;
+  const my=++gen;
+  const r=new SR();rec=r;
+  r.lang=LANGS[src.value][1];r.continuous=!IOS;r.interimResults=true;
+  let got=false,last="";
+  r.onresult=e=>{
+    if(my!==gen)return;
+    got=true;
     let interim="";
     for(let i=e.resultIndex;i<e.results.length;i++){
-      const r=e.results[i],t=r[0].transcript.trim();
-      if(r.isFinal){if(t)onFinal(t)}else interim+=t;
+      const x=e.results[i],t=x[0].transcript.trim();
+      if(x.isFinal){last="";if(t)onFinal(t)}else interim+=t;
     }
-    if(interim)onInterim(interim);
+    if(interim){last=interim;onInterim(interim)}
   };
-  rec.onerror=e=>{
-    if(e.error==="not-allowed"||e.error==="service-not-allowed"){say("マイクが許可されていません。ブラウザの設定で許可してください。");stop()}
-    else if(e.error!=="no-speech"&&e.error!=="aborted")say("音声認識エラー: "+e.error);
+  r.onerror=e=>{
+    if(my!==gen)return;
+    if(e.error==="not-allowed"||e.error==="service-not-allowed"){stop();say("マイクが許可されていません("+e.error+")。設定でマイクと音声入力を許可してください。");return}
+    if(e.error!=="no-speech"&&e.error!=="aborted")say("音声認識エラー: "+e.error);
   };
-  rec.onend=()=>{if(running){try{rec.start()}catch(e){}}};
+  r.onend=()=>{
+    if(my!==gen||!running)return;
+    if(last){const t=last;last="";onFinal(t)}
+    setTimeout(()=>{if(my===gen&&running){say(LANGS[src.value][0]+"を聞き取り中…");listen()}},got?200:600);
+  };
+  try{r.start()}catch(e){say("開始失敗: "+e.message);setTimeout(()=>{if(my===gen&&running)listen()},1000)}
+}
+function start(){
+  if(!SR){say("このブラウザは音声認識に未対応です。iPhoneはSafari、PCはChromeで開いてください。");return}
   running=true;mic.classList.add("on");mic.textContent="停止";
   say(LANGS[src.value][0]+"を聞き取り中…");
-  try{rec.start()}catch(e){}
+  listen();
 }
 function stop(){
-  running=false;mic.classList.remove("on");mic.textContent="通訳を開始";
+  running=false;gen++;mic.classList.remove("on");mic.textContent="通訳を開始";
   clearTimeout(timer);token++;
-  if(rec){rec.onend=null;try{rec.stop()}catch(e){}}
+  if(rec){rec.onend=null;rec.onresult=null;rec.onerror=null;try{rec.abort()}catch(e){}}
   setInterim(inp,"");setInterim(out,"");
   if("speechSynthesis" in window)speechSynthesis.cancel();
   say("停止しました。");
