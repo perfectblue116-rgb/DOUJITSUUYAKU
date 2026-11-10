@@ -70,7 +70,7 @@ const src=$("src"),dst=$("dst"),inp=$("inp"),out=$("out"),msg=$("msg"),mic=$("mi
 LANGS.forEach((l,i)=>{src.add(new Option(l[0],i));dst.add(new Option(l[0],i))});
 src.value=0;dst.value=1;
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-let sm=null,rec=null,running=false,token=0,timer=null,translators={};
+let rec=null,running=false,token=0,timer=null,translators={};
 const say=t=>msg.textContent=t;
 const lab=()=>{$("srcLabel").textContent="原文("+LANGS[src.value][0]+")";$("dstLabel").textContent="訳文("+LANGS[dst.value][0]+")"};
 lab();
@@ -84,7 +84,16 @@ $("copy").onclick=async()=>{
   try{await navigator.clipboard.writeText(t);say("コピーしました。")}catch{say("コピーできませんでした。")}
 };
 
+async function getJ(url){
+  const c=new AbortController(),t=setTimeout(()=>c.abort(),8000);
+  try{
+    const r=await fetch(url,{signal:c.signal});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    return await r.json();
+  }finally{clearTimeout(t)}
+}
 async function translate(text,s,d){
+  const q=encodeURIComponent(text),errs=[];
   if("Translator" in self){
     try{
       const k=s+">"+d;
@@ -93,12 +102,22 @@ async function translate(text,s,d){
         if(av!=="unavailable")translators[k]=await Translator.create({sourceLanguage:s,targetLanguage:d});
       }
       if(translators[k])return await translators[k].translate(text);
-    }catch(e){}
+    }catch(e){errs.push("内蔵:"+e.message)}
   }
-  if(!sm&&window.claude&&claude.use)sm=await claude.use("sample");
-  if(!sm)throw new Error("no translator");
-  const r=await sm("Translate the following text from "+s+" to "+d+". Output only the translation, nothing else.\n\n"+text,{modelTier:"quick",cache:false});
-  return r.text.trim();
+  const providers=[
+    ["G1",async()=>{const j=await getJ("https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl="+s+"&tl="+d+"&q="+q);return j[0].map(x=>x[0]).join("")}],
+    ["G2",async()=>{const j=await getJ("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl="+s+"&tl="+d+"&q="+q);
+      if(j.sentences)return j.sentences.map(x=>x.trans||"").join("");
+      if(Array.isArray(j))return Array.isArray(j[0])?j[0][0]:j[0];
+      throw new Error("形式不明")}],
+    ["MM",async()=>{const j=await getJ("https://api.mymemory.translated.net/get?q="+q+"&langpair="+s+"|"+d);
+      if(j.responseStatus&&j.responseStatus!=200)throw new Error(String(j.responseDetails||j.responseStatus));
+      return j.responseData.translatedText}]
+  ];
+  for(const [n,f] of providers){
+    try{const r=await f();if(r)return r}catch(e){errs.push(n+":"+(e.name==="AbortError"?"timeout":e.message))}
+  }
+  throw new Error(errs.join(" / "));
 }
 
 function setInterim(box,text){
@@ -125,7 +144,7 @@ async function onInterim(text){
     try{
       const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
       if(my===token&&running)setInterim(out,t);
-    }catch(e){say("翻訳に失敗しました。通信状況を確認してください。")}
+    }catch(e){say("翻訳失敗: "+e.message)}
   },500);
 }
 async function onFinal(text){
@@ -135,7 +154,7 @@ async function onFinal(text){
   try{
     const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
     addFinal(out,t);speak(t,LANGS[dst.value][1]);
-  }catch(e){addFinal(out,"(翻訳失敗)");say("翻訳に失敗しました。通信状況を確認してください。")}
+  }catch(e){addFinal(out,"(翻訳失敗)");say("翻訳失敗: "+e.message)}
 }
 
 function start(){
@@ -151,7 +170,7 @@ function start(){
     if(interim)onInterim(interim);
   };
   rec.onerror=e=>{
-    if(e.error==="not-allowed"||e.error==="service-not-allowed"){stop();say("マイクを使えませんでした("+e.error+")。claude.ai上のページではマイクが使えません。同時通訳アプリ.htmlを自社のhttps URLに置いて開いてください。")}
+    if(e.error==="not-allowed"||e.error==="service-not-allowed"){say("マイクが許可されていません。ブラウザの設定で許可してください。");stop()}
     else if(e.error!=="no-speech"&&e.error!=="aborted")say("音声認識エラー: "+e.error);
   };
   rec.onend=()=>{if(running){try{rec.start()}catch(e){}}};
