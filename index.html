@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>同時通訳</title>
+<style>
+:root{--bg:#f4f5f2;--card:#fff;--ink:#1b2a2f;--sub:#6a7a7e;--line:#d9dedb;--acc:#0e7c86;--acc-ink:#fff;--rec:#d64545;--interim:#8a9a9e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#10181b;--card:#182327;--ink:#e8eeee;--sub:#8fa0a4;--line:#2a393e;--acc:#38b2bd;--acc-ink:#06181b;--rec:#ef6a6a;--interim:#7d8f94;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:"Hiragino Sans","Noto Sans JP","Yu Gothic",system-ui,sans-serif;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{padding:12px 16px 8px;display:flex;align-items:center;gap:8px}
+h1{font-size:18px;margin:0;flex:1}
+.ib{background:none;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:13px}
+.langs{display:flex;gap:8px;padding:0 16px 8px;align-items:center}
+select{flex:1;min-width:0;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:15px}
+#swap{flex:none;width:44px;height:42px;font-size:18px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+.opts{display:flex;gap:16px;padding:0 16px 8px;font-size:13px;color:var(--sub);flex-wrap:wrap}
+.opts label{display:flex;align-items:center;gap:6px}
+main{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:0 16px}
+.pane{flex:1;min-height:0;background:var(--card);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column}
+.pane h2{margin:0;padding:8px 12px 0;font-size:12px;font-weight:600;color:var(--sub)}
+.box{flex:1;overflow-y:auto;padding:6px 12px 10px;font-size:var(--fs,20px);line-height:1.55}
+.box p{margin:0 0 .5em}
+.interim{color:var(--interim)}
+#out .box p:last-child:not(.interim){font-weight:600}
+.msg{padding:6px 16px;font-size:12px;color:var(--sub);min-height:28px}
+.bar{display:flex;gap:10px;padding:8px 16px 14px;align-items:center}
+#mic{flex:1;height:54px;border:0;border-radius:27px;background:var(--acc);color:var(--acc-ink);font-size:17px;font-weight:700}
+#mic.on{background:var(--rec);color:#fff}
+#mic.on::before{content:"● ";animation:b 1.2s infinite}
+@keyframes b{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){#mic.on::before{animation:none}}
+.bar .ib{height:54px;padding:0 14px}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>同時通訳</h1>
+  <button class="ib" id="copy">コピー</button>
+  <button class="ib" id="clear">消去</button>
+</header>
+<div class="langs">
+  <select id="src" aria-label="話す言語"></select>
+  <button id="swap" aria-label="言語を入れ替え">⇄</button>
+  <select id="dst" aria-label="訳す言語"></select>
+</div>
+<div class="opts">
+  <label><input type="checkbox" id="speak"> 訳文を読み上げ(イヤホン推奨)</label>
+  <label><input type="checkbox" id="live" checked> 話し途中でも翻訳</label>
+  <label>文字 <input type="range" id="fs" min="14" max="34" value="20"></label>
+</div>
+<main>
+  <section class="pane"><h2 id="srcLabel">原文</h2><div class="box" id="inp"></div></section>
+  <section class="pane"><h2 id="dstLabel">訳文</h2><div class="box" id="out"></div></section>
+</main>
+<div class="msg" id="msg">開始を押してマイクを許可してください。</div>
+<div class="bar"><button id="mic">通訳を開始</button></div>
+
+<script>
+const LANGS=[
+ ["日本語","ja-JP","ja"],["English","en-US","en"],["中文(简体)","zh-CN","zh-CN"],["한국어","ko-KR","ko"],
+ ["Español","es-ES","es"],["Français","fr-FR","fr"],["Deutsch","de-DE","de"],["Português","pt-BR","pt"],
+ ["Tiếng Việt","vi-VN","vi"],["ไทย","th-TH","th"],["Bahasa Indonesia","id-ID","id"],["Русский","ru-RU","ru"]
+];
+const $=id=>document.getElementById(id);
+const src=$("src"),dst=$("dst"),inp=$("inp"),out=$("out"),msg=$("msg"),mic=$("mic");
+LANGS.forEach((l,i)=>{src.add(new Option(l[0],i));dst.add(new Option(l[0],i))});
+src.value=0;dst.value=1;
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let sm=null,rec=null,running=false,token=0,timer=null,translators={};
+const say=t=>msg.textContent=t;
+const lab=()=>{$("srcLabel").textContent="原文("+LANGS[src.value][0]+")";$("dstLabel").textContent="訳文("+LANGS[dst.value][0]+")"};
+lab();
+[src,dst].forEach(s=>s.onchange=()=>{lab();if(running){stop();start()}});
+$("swap").onclick=()=>{const a=src.value;src.value=dst.value;dst.value=a;src.onchange()};
+$("fs").oninput=e=>document.documentElement.style.setProperty("--fs",e.target.value+"px");
+$("clear").onclick=()=>{inp.innerHTML="";out.innerHTML=""};
+$("copy").onclick=async()=>{
+  const a=[...inp.querySelectorAll("p:not(.interim)")].map(p=>p.textContent),b=[...out.querySelectorAll("p:not(.interim)")].map(p=>p.textContent);
+  const t=a.map((x,i)=>x+"\n→ "+(b[i]||"")).join("\n\n");
+  try{await navigator.clipboard.writeText(t);say("コピーしました。")}catch{say("コピーできませんでした。")}
+};
+
+async function translate(text,s,d){
+  if("Translator" in self){
+    try{
+      const k=s+">"+d;
+      if(!translators[k]){
+        const av=await Translator.availability({sourceLanguage:s,targetLanguage:d});
+        if(av!=="unavailable")translators[k]=await Translator.create({sourceLanguage:s,targetLanguage:d});
+      }
+      if(translators[k])return await translators[k].translate(text);
+    }catch(e){}
+  }
+  if(!sm&&window.claude&&claude.use)sm=await claude.use("sample");
+  if(!sm)throw new Error("no translator");
+  const r=await sm("Translate the following text from "+s+" to "+d+". Output only the translation, nothing else.\n\n"+text,{modelTier:"quick",cache:false});
+  return r.text.trim();
+}
+
+function setInterim(box,text){
+  let p=box.querySelector("p.interim");
+  if(!text){if(p)p.remove();return}
+  if(!p){p=document.createElement("p");p.className="interim";box.appendChild(p)}
+  p.textContent=text;box.scrollTop=box.scrollHeight;
+}
+function addFinal(box,text){
+  setInterim(box,"");
+  const p=document.createElement("p");p.textContent=text;box.appendChild(p);box.scrollTop=box.scrollHeight;
+}
+function speak(text,lang){
+  if(!$("speak").checked||!("speechSynthesis" in window))return;
+  const u=new SpeechSynthesisUtterance(text);u.lang=lang;speechSynthesis.speak(u);
+}
+
+async function onInterim(text){
+  setInterim(inp,text);
+  if(!$("live").checked)return;
+  clearTimeout(timer);
+  const my=++token;
+  timer=setTimeout(async()=>{
+    try{
+      const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
+      if(my===token&&running)setInterim(out,t);
+    }catch(e){say("翻訳に失敗しました。通信状況を確認してください。")}
+  },500);
+}
+async function onFinal(text){
+  clearTimeout(timer);token++;
+  addFinal(inp,text);
+  setInterim(out,"…");
+  try{
+    const t=await translate(text,LANGS[src.value][2],LANGS[dst.value][2]);
+    addFinal(out,t);speak(t,LANGS[dst.value][1]);
+  }catch(e){addFinal(out,"(翻訳失敗)");say("翻訳に失敗しました。通信状況を確認してください。")}
+}
+
+function start(){
+  if(!SR){say("このブラウザは音声認識に未対応です。iPhoneはSafari、PCはChromeで開いてください。");return}
+  rec=new SR();
+  rec.lang=LANGS[src.value][1];rec.continuous=true;rec.interimResults=true;
+  rec.onresult=e=>{
+    let interim="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const r=e.results[i],t=r[0].transcript.trim();
+      if(r.isFinal){if(t)onFinal(t)}else interim+=t;
+    }
+    if(interim)onInterim(interim);
+  };
+  rec.onerror=e=>{
+    if(e.error==="not-allowed"||e.error==="service-not-allowed"){stop();say("マイクを使えませんでした("+e.error+")。claude.ai上のページではマイクが使えません。同時通訳アプリ.htmlを自社のhttps URLに置いて開いてください。")}
+    else if(e.error!=="no-speech"&&e.error!=="aborted")say("音声認識エラー: "+e.error);
+  };
+  rec.onend=()=>{if(running){try{rec.start()}catch(e){}}};
+  running=true;mic.classList.add("on");mic.textContent="停止";
+  say(LANGS[src.value][0]+"を聞き取り中…");
+  try{rec.start()}catch(e){}
+}
+function stop(){
+  running=false;mic.classList.remove("on");mic.textContent="通訳を開始";
+  clearTimeout(timer);token++;
+  if(rec){rec.onend=null;try{rec.stop()}catch(e){}}
+  setInterim(inp,"");setInterim(out,"");
+  if("speechSynthesis" in window)speechSynthesis.cancel();
+  say("停止しました。");
+}
+mic.onclick=()=>running?stop():start();
+(function(){
+  const p=location.protocol;
+  if(!SR)say("診断: このブラウザは音声認識に未対応です。Safari(iPhone)かChrome(PC)で開いてください。");
+  else if(p==="file:")say("診断: ファイルから直接開いています。マイクが使えない場合は、https のURLで開いてください。");
+  else if(p!=="https:"&&location.hostname!=="localhost")say("診断: https ではないためマイクが使えません。https のURLで開いてください。");
+  else say("準備OK。「通訳を開始」を押してマイクを許可してください。");
+})();
+</script>
+</body>
+</html>
